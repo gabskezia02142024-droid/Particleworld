@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LUV - Final Gesture Control</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        
+        #video-preview { 
+            position: absolute; top: 15px; right: 15px; width: 320px; height: 240px; 
+            border: 3px solid #ff0077; transform: scaleX(-1); z-index: 100;
+            border-radius: 12px; background: #111; opacity: 0.85;
+            box-shadow: 0 0 15px rgba(255, 0, 119, 0.5);
+        }
+        
+        #ui {
+            position: absolute; top: 20px; width: 100%; text-align: center;
+            color: #ff0077; z-index: 50; text-transform: uppercase; letter-spacing: 2px;
+            text-shadow: 0 0 10px #ff0077; font-weight: bold;
+            font-size: 24px; 
+        }
+        #btn {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            padding: 20px 40px; background: #ff0077; color: #fff; font-weight: bold;
+            font-size: 18px;
+            border: none; border-radius: 50px; cursor: pointer; z-index: 200;
+        }
+    </style>
+</head>
+<body>
+    <button id="btn" onclick="start()">ACTIVATE SYSTEM</button>
+    <div id="ui">SHOW ONE HAND TO BEGIN</div>
+    <video id="input_video" style="display:none" playsinline></video>
+    <canvas id="video-preview"></canvas>
+
+    <script>
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const particles = [];
+        const bgParticles = []; 
+        let mode = "scatter"; 
+        let hX = 0, hY = 0;
+        
+        let explosionProgress = 0;
+
+        function updateCameraDistance() {
+            const aspect = window.innerWidth / window.innerHeight;
+            // CAMERA PULLED WAY BACK to fit the giant letters
+            const baseZ = 160; 
+            camera.position.z = aspect < 1 ? (baseZ / aspect) : (baseZ * 0.85); 
+            camera.updateProjectionMatrix();
+        }
+
+        // CHANGED BACK TO HEART: High resolution 512x512 canvas for massive, crisp hearts
+        function createHeartTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            
+            ctx.fillStyle = "#ff0077";
+            ctx.font = "bold 400px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("♥", 256, 288); 
+
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const heartTexture = createHeartTexture();
+
+        function getHeartShapeCoordinates() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 600;
+            canvas.height = 600;
+            const ctx = canvas.getContext('2d');
+            
+            ctx.fillStyle = "white";
+            ctx.font = "bold 500px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("♥", 300, 330); 
+
+            const data = ctx.getImageData(0, 0, 600, 600).data;
+            const coords = [];
+            
+            // Scaled spacing for background heart
+            for (let y = 0; y < 600; y += 35) {
+                for (let x = 0; x < 600; x += 35) {
+                    const alpha = data[(y * 600 + x) * 4 + 3];
+                    if (alpha > 128) {
+                        coords.push({
+                            x: (x - 300) * 0.4, 
+                            y: (300 - y) * 0.4
+                        });
+                    }
+                }
+            }
+            return coords;
+        }
+
+        function getTextCoordinates(text, fontSetting, canvasWidth, canvasHeight, spacing, scaleModifier) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = canvasWidth; 
+            canvas.height = canvasHeight;
+            ctx.fillStyle = "white";
+            ctx.font = fontSetting;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(text, canvasWidth / 2, canvasHeight / 2);
+
+            const data = ctx.getImageData(0, 0, canvasWidth, canvasHeight).data;
+            const coords = [];
+            
+            for (let y = 0; y < canvasHeight; y += spacing) {
+                for (let x = 0; x < canvasWidth; x += spacing) {
+                    const alpha = data[(y * canvasWidth + x) * 4 + 3];
+                    if (alpha > 128) {
+                        coords.push({
+                            x: (x - (canvasWidth / 2)) * scaleModifier, 
+                            y: ((canvasHeight / 2) - y) * scaleModifier
+                        });
+                    }
+                }
+            }
+            return coords;
+        }
+
+        function setupParticles() {
+            // SPACING & MODIFIER INCREASED MASSIVELY: This spaces the massive chunks out so they don't overlap
+            const heartTextCoords = getTextCoordinates("I LOVE YOU LUV", "bold 140px Arial", 2400, 300, 16, 0.09);
+            const lTextCoords = getTextCoordinates("SEE YOU WHENEVER SEE YOU", "bold 110px Arial", 2800, 300, 16, 0.09);
+            const peaceTextCoords = getTextCoordinates("I'M SORRY LUV :(", "bold 150px Arial", 2600, 300, 16, 0.09);
+            
+            const maxParticles = Math.max(heartTextCoords.length, lTextCoords.length, peaceTextCoords.length);
+
+            const material = new THREE.SpriteMaterial({ 
+                map: heartTexture, 
+                color: 0xffffff 
+            });
+
+            // 1. Setup the main text particles
+            for (let i = 0; i < maxParticles; i++) {
+                const particle = new THREE.Sprite(material);
+                
+                // MASSIVE CHUNKS: Size is 1.5, perfectly balanced with the spacing
+                particle.scale.set(1.5, 1.5, 1); 
+
+                particle.userData.randX = (Math.random() - 0.5) * 120;
+                particle.userData.randY = (Math.random() - 0.5) * 80;
+                particle.userData.randZ = (Math.random() - 0.5) * 50;
+                
+                particle.userData.fireworkDX = (Math.random() - 0.5) * 250;
+                particle.userData.fireworkDY = (Math.random() - 0.5) * 250;
+                particle.userData.fireworkDZ = (Math.random() - 0.5) * 100;
+
+                particle.position.set(particle.userData.randX, particle.userData.randY, particle.userData.randZ);
+
+                if (i < heartTextCoords.length) {
+                    particle.userData.heartX = heartTextCoords[i].x;
+                    particle.userData.heartY = heartTextCoords[i].y;
+                } else {
+                    particle.userData.heartX = particle.userData.randX;
+                    particle.userData.heartY = particle.userData.randY;
+                }
+
+                if (i < lTextCoords.length) {
+                    particle.userData.lX = lTextCoords[i].x;
+                    particle.userData.lY = lTextCoords[i].y;
+                } else {
+                    particle.userData.lX = particle.userData.randX;
+                    particle.userData.lY = particle.userData.randY;
+                }
+
+                if (i < peaceTextCoords.length) {
+                    particle.userData.peaceX = peaceTextCoords[i].x;
+                    particle.userData.peaceY = peaceTextCoords[i].y;
+                } else {
+                    particle.userData.peaceX = particle.userData.randX;
+                    particle.userData.peaceY = particle.userData.randY;
+                }
+
+                particles.push(particle);
+                scene.add(particle);
+            }
+
+            // 2. Setup the structured background heart shape
+            const bgHeartCoords = getHeartShapeCoordinates();
+            
+            for (let i = 0; i < bgHeartCoords.length; i++) {
+                const bgParticle = new THREE.Sprite(material);
+                bgParticle.scale.set(0, 0, 1); 
+                
+                bgParticle.userData.randX = (Math.random() - 0.5) * 300;
+                bgParticle.userData.randY = (Math.random() - 0.5) * 200;
+                bgParticle.userData.randZ = -80 - (Math.random() * 40);
+                
+                bgParticle.userData.targetX = bgHeartCoords[i].x;
+                bgParticle.userData.targetY = bgHeartCoords[i].y;
+                bgParticle.userData.targetZ = -60; 
+                
+                bgParticle.position.set(bgParticle.userData.randX, bgParticle.userData.randY, bgParticle.userData.randZ);
+                
+                bgParticles.push(bgParticle);
+                scene.add(bgParticle);
+            }
+        }
+        
+        setupParticles();
+        updateCameraDistance(); 
+
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('video-preview');
+        canvasElement.width = 320;
+        canvasElement.height = 240;
+        const canvasCtx = canvasElement.getContext('2d');
+
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            if(results.image) {
+                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            }
+            
+            const numHands = results.multiHandLandmarks ? results.multiHandLandmarks.length : 0;
+            
+            if (numHands === 1) {
+                let hand = results.multiHandLandmarks[0];
+                hX = (hand[9].x - 0.5) * -15;
+                hY = (hand[9].y - 0.5) * -10;
+
+                const isIndexUp = hand[8].y < hand[6].y;
+                const isMiddleUp = hand[12].y < hand[10].y;
+                const isRingUp = hand[16].y < hand[14].y;
+                const isPinkyUp = hand[20].y < hand[18].y;
+                
+                const isMiddleDown = !isMiddleUp;
+                const isRingDown = !isRingUp;
+                const isPinkyDown = !isPinkyUp;
+
+                const distThumbIndex = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
+                const isPinchingDistance = distThumbIndex < 0.05;
+
+                const isOpenPalm = isIndexUp && isMiddleUp && isRingUp && isPinkyUp && !isPinchingDistance;
+                const isLShape = isIndexUp && isMiddleDown && isRingDown && isPinkyDown && !isPinchingDistance;
+                const isPeaceSign = isIndexUp && isMiddleUp && isRingDown && isPinkyDown && !isPinchingDistance;
+
+                if (isOpenPalm) {
+                    mode = "heartText";
+                    document.getElementById('ui').innerText = "♥ I LOVE YOU ♥";
+                } else if (isLShape) {
+                    mode = "lText";
+                    document.getElementById('ui').innerText = "👆 SEE YOU 👆";
+                } else if (isPeaceSign) {
+                    if (mode !== "peaceText") {
+                        explosionProgress = 1.0; 
+                    }
+                    mode = "peaceText";
+                    document.getElementById('ui').innerText = "✌ I'M SORRY :( ✌";
+                } else {
+                    mode = "scatter";
+                    document.getElementById('ui').innerText = "MAKE A GESTURE";
+                }
+            } else {
+                mode = "scatter";
+                document.getElementById('ui').innerText = numHands >= 2 ? "⚠ PLEASE USE ONLY ONE HAND ⚠" : "WAITING FOR HAND...";
+            }
+            canvasCtx.restore();
+        }
+
+        const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5 });
+        hands.onResults(onResults);
+
+        const camera_setup = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+
+        function start() {
+            document.getElementById('btn').style.display = 'none';
+            camera_setup.start();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = Date.now() * 0.001;
+
+            const beatScale = 1 + Math.sin(time * 8) * 0.3;
+
+            if (explosionProgress > 0) {
+                explosionProgress = Math.max(0, explosionProgress - 0.015);
+            }
+            
+            const boom = explosionProgress * explosionProgress * explosionProgress;
+
+            // Animate main text particles
+            particles.forEach((particle, i) => {
+                let tx = 0, ty = 0, tz = 0;
+                let targetScale = 1.5; // MATCH THE MASSIVE SCALE HERE
+                
+                if (mode === "heartText") {
+                    tx = particle.userData.heartX + hX;
+                    ty = particle.userData.heartY + hY;
+                    targetScale = 1.5 * beatScale; 
+                } else if (mode === "lText") {
+                    tx = particle.userData.lX + hX;
+                    ty = particle.userData.lY + hY;
+                } else if (mode === "peaceText") {
+                    tx = particle.userData.peaceX + hX + (particle.userData.fireworkDX * boom);
+                    ty = particle.userData.peaceY + hY + (particle.userData.fireworkDY * boom);
+                    tz = (particle.userData.fireworkDZ * boom);
+                } else {
+                    tx = particle.userData.randX + Math.sin(time + i) * 0.5;
+                    ty = particle.userData.randY + Math.cos(time + i) * 0.5;
+                    tz = particle.userData.randZ;
+                }
+
+                particle.position.x += (tx - particle.position.x) * 0.08;
+                particle.position.y += (ty - particle.position.y) * 0.08;
+                particle.position.z += (tz - particle.position.z) * 0.08;
+                
+                particle.scale.lerp(new THREE.Vector3(targetScale, targetScale, 1), 0.2);
+            });
+
+            // Animate background heart formation
+            bgParticles.forEach((bgParticle, i) => {
+                let tx = 0, ty = 0, tz = 0;
+                let bgTargetScale = 0;
+                
+                if (mode === "heartText") {
+                    tx = bgParticle.userData.targetX;
+                    ty = bgParticle.userData.targetY;
+                    tz = bgParticle.userData.targetZ;
+                    
+                    bgTargetScale = 4.0 * beatScale; 
+                } else {
+                    tx = bgParticle.userData.randX + Math.sin(time + i) * 0.5;
+                    ty = bgParticle.userData.randY + Math.cos(time + i) * 0.5;
+                    tz = bgParticle.userData.randZ;
+                    bgTargetScale = 0;
+                }
+                
+                bgParticle.position.x += (tx - bgParticle.position.x) * 0.05;
+                bgParticle.position.y += (ty - bgParticle.position.y) * 0.05;
+                bgParticle.position.z += (tz - bgParticle.position.z) * 0.05;
+                
+                bgParticle.scale.lerp(new THREE.Vector3(bgTargetScale, bgTargetScale, 1), 0.15);
+            });
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            updateCameraDistance();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
